@@ -6,7 +6,7 @@ import streamlit as st
 from PIL import Image
 from skimage.metrics import structural_similarity
 
-from app import (
+from stego_core import (
 	apply_attack,
 	calculate_ber,
 	embed_message,
