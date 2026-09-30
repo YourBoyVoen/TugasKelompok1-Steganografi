@@ -31,6 +31,15 @@ if "attack_results" not in st.session_state:
 	st.session_state.attack_results = {}
 if "attack_messages" not in st.session_state:
 	st.session_state.attack_messages = {}
+if "attack_images" not in st.session_state:
+	st.session_state.attack_images = {}
+if "attack_filenames" not in st.session_state:
+	st.session_state.attack_filenames = {}
+if set(st.session_state.attack_results).difference(st.session_state.attack_images):
+	st.session_state.attack_results = {}
+	st.session_state.attack_messages = {}
+	st.session_state.attack_images = {}
+	st.session_state.attack_filenames = {}
 if "extracted_message" not in st.session_state:
 	st.session_state.extracted_message = None
 if "extraction_error" not in st.session_state:
@@ -46,6 +55,25 @@ def image_from_bytes(data: bytes) -> Image.Image:
 
 def active_stego_bytes() -> bytes | None:
 	return st.session_state.uploaded_stego_png
+
+
+def evaluate_attacks(source_image: Image.Image, message: str, method: str, attacks):
+	results = {}
+	extracted_messages = {}
+	attacked_images = {}
+	filenames = {}
+	for label, filename, parameters in attacks:
+		attacked = apply_attack(source_image, **parameters)
+		results[label] = calculate_ber(attacked, message, method)
+		try:
+			extracted_messages[label] = extract_message(attacked, method)
+		except ValueError as error:
+			extracted_messages[label] = f"Ekstraksi gagal: {error}"
+		output = io.BytesIO()
+		attacked.save(output, format="PNG")
+		attacked_images[label] = output.getvalue()
+		filenames[label] = filename
+	return results, extracted_messages, attacked_images, filenames
 
 
 def calculate_metrics(original: Image.Image, compared: Image.Image):
@@ -114,6 +142,8 @@ with encode_tab:
 				st.session_state.uploaded_stego_png = None
 				st.session_state.attack_results = {}
 				st.session_state.attack_messages = {}
+				st.session_state.attack_images = {}
+				st.session_state.attack_filenames = {}
 				st.session_state.extracted_message = None
 				st.session_state.extraction_error = None
 				st.session_state.metric_results = None
@@ -177,33 +207,72 @@ with attack_tab:
 	jpeg_quality = st.slider("Kualitas JPEG (%)", 1, 100, 50)
 	blur_radius = st.slider("Radius Gaussian blur", 0.0, 10.0, 2.0, 0.1)
 	noise_stddev = st.slider("Sigma Gaussian noise", 0.0, 50.0, 10.0, 0.5)
+	selected_attack = st.selectbox(
+		"Serangan untuk dijalankan sendiri",
+		("JPEG", "Gaussian blur", "Gaussian noise"),
+	)
+
+	attack_options = {
+		"JPEG": (
+			f"JPEG quality {jpeg_quality}",
+			f"{method.lower()}_jpeg_q{jpeg_quality}.png",
+			{"quality": jpeg_quality},
+		),
+		"Gaussian blur": (
+			f"Gaussian blur radius {blur_radius:g}",
+			f"{method.lower()}_gaussian_blur_r{blur_radius:g}.png",
+			{"attack_type": "Gaussian blur", "blur_radius": blur_radius},
+		),
+		"Gaussian noise": (
+			f"Gaussian noise sigma {noise_stddev:g}",
+			f"{method.lower()}_gaussian_noise_sigma{noise_stddev:g}.png",
+			{"attack_type": "Gaussian noise", "noise_stddev": noise_stddev},
+		),
+	}
+	selected_label, selected_filename, selected_parameters = attack_options[selected_attack]
+	selected_key = f"{method} | {selected_label}"
+
+	if st.button(
+		"Jalankan serangan terpilih",
+		disabled=current_stego is None or not attack_message,
+		key="run_selected_attack",
+	):
+		try:
+			results, messages, images, filenames = evaluate_attacks(
+				image_from_bytes(current_stego),
+				attack_message,
+				method,
+				((selected_key, selected_filename, selected_parameters),),
+			)
+			st.session_state.attack_results.update(results)
+			st.session_state.attack_messages.update(messages)
+			st.session_state.attack_images.update(images)
+			st.session_state.attack_filenames.update(filenames)
+		except Exception as error:
+			st.error(str(error))
 
 	if st.button(
 		"Jalankan semua serangan",
-		type="primary",
+		 type="primary",
 		disabled=current_stego is None or not attack_message,
+		key="run_all_attacks",
 	):
 		try:
-			source_image = image_from_bytes(current_stego)
-			attacks = (
-				("JPEG", {"quality": jpeg_quality}),
-				("Gaussian blur", {"attack_type": "Gaussian blur", "blur_radius": blur_radius}),
+			attacks = tuple(
 				(
-					"Gaussian noise",
-					{"attack_type": "Gaussian noise", "noise_stddev": noise_stddev},
-				),
+					f"{method} | {label}",
+					filename,
+					parameters,
+				)
+				for label, filename, parameters in attack_options.values()
 			)
-			results = {}
-			extracted_messages = {}
-			for attack_name, parameters in attacks:
-				attacked = apply_attack(source_image, **parameters)
-				results[attack_name] = calculate_ber(attacked, attack_message, method)
-				try:
-					extracted_messages[attack_name] = extract_message(attacked, method)
-				except ValueError as error:
-					extracted_messages[attack_name] = f"Ekstraksi gagal: {error}"
-			st.session_state.attack_results = results
-			st.session_state.attack_messages = extracted_messages
+			results, messages, images, filenames = evaluate_attacks(
+				image_from_bytes(current_stego), attack_message, method, attacks
+			)
+			st.session_state.attack_results.update(results)
+			st.session_state.attack_messages.update(messages)
+			st.session_state.attack_images.update(images)
+			st.session_state.attack_filenames.update(filenames)
 		except Exception as error:
 			st.error(str(error))
 
@@ -213,15 +282,23 @@ with attack_tab:
 			index=list(st.session_state.attack_results),
 		)
 		st.bar_chart(chart_data)
-		for attack_name, ber in st.session_state.attack_results.items():
-			st.write(f"**{attack_name}:** {ber:.4%} BER")
-			st.text_area(
-				f"Pesan hasil ekstraksi: {attack_name}",
-				value=st.session_state.attack_messages[attack_name],
-				height=110,
-				disabled=True,
-				key=f"extracted_{attack_name}",
-			)
+		for index, (attack_name, ber) in enumerate(st.session_state.attack_results.items()):
+			with st.expander(f"{attack_name} | BER {ber:.2%}"):
+				st.image(st.session_state.attack_images[attack_name], use_container_width=True)
+				st.download_button(
+					"Unduh gambar hasil serangan",
+					data=st.session_state.attack_images[attack_name],
+					file_name=st.session_state.attack_filenames[attack_name],
+					mime="image/png",
+					key=f"download_attack_{index}",
+				)
+				st.text_area(
+					f"Pesan hasil ekstraksi: {attack_name}",
+					value=st.session_state.attack_messages[attack_name],
+					height=110,
+					disabled=True,
+					key=f"extracted_{index}",
+				)
 	elif current_stego is None:
 		st.info("Buat gambar stego, unduh, lalu unggah kembali pada tab Ekstrak.")
 
